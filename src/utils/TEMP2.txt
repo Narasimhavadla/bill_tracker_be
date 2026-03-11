@@ -1,0 +1,38 @@
+{
+  "message": "Picking completed (1m 25s). Verification started by krishna",
+  "order": {
+    "id": 2,
+    "customerName": "test-1",
+    "mobile": "6281323711",
+    "billNum": "1002",
+    "itemsCount": 15,
+    "status": "verifying",
+    "isVisible": true,
+    "isHidden": false,
+    "pickerId": "EMP03",
+    "pickerName": "Ramesh",
+    "verifierId": "EMP04",
+    "verifierName": "krishna",
+    "billedAt": "2026-03-11T12:54:05.000Z",
+    "pickedAt": "2026-03-11T12:55:47.000Z",
+    "verifiedAt": "2026-03-11T12:57:12.000Z",
+    "collectAt": null,
+    "completedAt": null,
+    "pickingTimeSecs": 85,
+    "verificationTimeSecs": null,
+    "totalTimeSecs": null,
+    "createdAt": "2026-03-11T12:54:05.000Z",
+    "updatedAt": "2026-03-11T12:57:12.000Z"
+  },
+  "doingBy": "krishna",
+  "metrics": {
+    "pickerName": "Ramesh",
+    "verifierName": "krishna",
+    "pickingTimeSecs": 85,
+    "pickingTimeFormatted": "1m 25s",
+    "verificationTimeSecs": 0,
+    "verificationTimeFormatted": null,
+    "totalTimeSecs": 187,
+    "totalTimeFormatted": "3m 7s"
+  }
+}

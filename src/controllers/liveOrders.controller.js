@@ -1,6 +1,10 @@
 
+const diffSecs = (start, end) =>
+    start && end ? Math.floor((new Date(end) - new Date(start)) / 1000) : null;
 
 const liveOrdersController = {
+
+    // ─── 1. CREATE BILL ────────────────────────────────────────────────────────
     createBill: async (req, res) => {
         try {
             const { customerName, mobile, billNum, itemsCount } = req.body;
@@ -9,7 +13,8 @@ const liveOrdersController = {
                 mobile,
                 billNum,
                 itemsCount,
-                status: 'billed'
+                status: 'billed',
+                billedAt: new Date()
             });
             res.status(201).json({ message: "Bill created and displayed", newOrder });
         } catch (error) {
@@ -17,26 +22,64 @@ const liveOrdersController = {
         }
     },
 
+    // ─── 2. LIVE FEED ──────────────────────────────────────────────────────────
     getLiveFeed: async (req, res) => {
         try {
             const activeOrders = await req.Liveorders.findAll({
                 where: {
-                    // Only show orders that are NOT completed
                     isVisible: true,
-                    // Only show orders that the Admin has NOT manually hidden
                     isHidden: false
                 },
-                // Sort so the most recently updated (e.g., "Ready for Collection") 
-                // shows at the top of the list
                 order: [['updatedAt', 'DESC']],
-                // Selecting only the fields needed for the public display
-                attributes: ['customerName', 'billNum', 'status', 'itemsCount',]
+                attributes: [
+                    'customerName',
+                    'mobile',           // ← customer mobile from create bill
+                    'billNum',
+                    'status',
+                    'itemsCount',
+                    // Who is doing each task
+                    'pickerId',
+                    'pickerName',
+                    'verifierId',
+                    'verifierName',
+                    // Stage timestamps
+                    'billedAt',
+                    'pickedAt',
+                    'verifiedAt',
+                    'collectAt',
+                    'completedAt',
+                    // Pre-calculated durations (seconds)
+                    'pickingTimeSecs',
+                    'verificationTimeSecs',
+                    'totalTimeSecs'
+                ]
+            });
+
+            // For in-progress orders, append a live "elapsed" duration so the
+            // frontend can display real-time counters without re-fetching.
+            const now = new Date();
+            const orders = activeOrders.map(o => {
+                const plain = o.get({ plain: true });
+
+                // Live picking duration (for orders currently being picked)
+                if (plain.status === 'picking' && plain.pickedAt) {
+                    plain.livePickingElapsedSecs = diffSecs(plain.pickedAt, now);
+                }
+                // Live verification duration (for orders currently being verified)
+                if (plain.status === 'verifying' && plain.verifiedAt) {
+                    plain.liveVerificationElapsedSecs = diffSecs(plain.verifiedAt, now);
+                }
+                // Live total elapsed since billed (any active order)
+                if (plain.billedAt) {
+                    plain.liveTotalElapsedSecs = diffSecs(plain.billedAt, now);
+                }
+                return plain;
             });
 
             res.status(200).json({
                 success: true,
-                count: activeOrders.length,
-                orders: activeOrders
+                count: orders.length,
+                orders
             });
         } catch (error) {
             res.status(500).json({
@@ -47,91 +90,117 @@ const liveOrdersController = {
         }
     },
 
+    // ─── 3. SCAN BILL (employee scans to advance the stage) ───────────────────
+    //
+    //  Flow:
+    //    billed   → [scan] → picking     (picking STARTS,      picker assigned)
+    //    picking  → [scan] → verifying   (picking ENDS,        pickingTimeSecs stored)
+    //                                    (verification STARTS, verifier assigned)
+    //    verifying→ [scan] → collect     (verification ENDS,   verificationTimeSecs stored)
+    //
     scanBill: async (req, res) => {
         try {
             const { billNum, empId } = req.body;
             const now = new Date();
 
-            // 1. Find the order
             const order = await req.Liveorders.findOne({ where: { billNum } });
             if (!order) return res.status(404).json({ message: "Bill not found" });
 
-            // 2. Verify Employee exists and get their name
             const employee = await req.EmployeeModal.findOne({ where: { empId } });
             if (!employee) return res.status(404).json({ message: "Employee ID not recognized" });
 
             let updateData = {};
             let feedbackMessage = "";
 
-            // Logic flow based on current state
             if (order.status === 'billed') {
-                // START PICKING: (Time from Billed -> Scan 1)
+                // ── Picking STARTS ──────────────────────────────────────────────
                 updateData = {
                     status: 'picking',
                     pickerId: empId,
-                    pickedAt: now
+                    pickerName: employee.empName,
+                    pickedAt: now          // picking start timestamp
                 };
                 feedbackMessage = `Picking started by ${employee.empName}`;
 
             } else if (order.status === 'picking') {
-                // START VERIFYING: (Picking Ends, Verification Starts)
+                // ── Picking ENDS / Verification STARTS ─────────────────────────
+                const pickingTimeSecs = diffSecs(order.pickedAt, now); // picking duration
                 updateData = {
                     status: 'verifying',
                     verifierId: empId,
-                    verifiedAt: now
+                    verifierName: employee.empName,
+                    verifiedAt: now,        // verification start / picking end timestamp
+                    pickingTimeSecs         // store how long picking took
                 };
-                feedbackMessage = `Picking completed. Verification started by ${employee.empName}`;
+                feedbackMessage = `Picking completed (${formatDuration(pickingTimeSecs)}). Verification started by ${employee.empName}`;
 
             } else if (order.status === 'verifying') {
-                // READY TO COLLECT: (Verification Ends)
+                // ── Verification ENDS / Ready to Collect ───────────────────────
+                const verificationTimeSecs = diffSecs(order.verifiedAt, now); // verification duration
                 updateData = {
-                    status: 'collect'
+                    status: 'collect',
+                    collectAt: now,          // collect-ready timestamp / verification end
+                    verificationTimeSecs     // store how long verification took
                 };
-                feedbackMessage = "Order verified and ready for collection";
+                feedbackMessage = `Verification complete (${formatDuration(verificationTimeSecs)}). Order ready for collection`;
+
+            } else {
+                return res.status(400).json({
+                    message: `Order is currently in '${order.status}' status and cannot be scanned`
+                });
             }
 
             await order.update(updateData);
-
-            // 3. Calculate Performance Metrics for Response
-            const metrics = calculateMetrics(order, updateData, now);
+            const updated = await req.Liveorders.findOne({ where: { billNum } });
 
             res.status(200).json({
                 message: feedbackMessage,
-                order,
-                metrics,
-                currentHandler: employee.empName
+                order: updated,
+                doingBy: employee.empName,
+                metrics: buildMetrics(updated)
             });
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
     },
 
-
+    // ─── 4. COMPLETE ORDER (customer collects) ─────────────────────────────────
     completeOrder: async (req, res) => {
         try {
             const { billNum } = req.params;
-            const order = await req.Liveorders.update({
-                status: 'completed',
-                completedAt: new Date(),
-                isVisible: false // Automatically hide from customer screen
-            }, { where: { billNum } });
+            const now = new Date();
 
-            res.status(200).json({ message: "Order completed and removed from live view" });
+            const order = await req.Liveorders.findOne({ where: { billNum } });
+            if (!order) return res.status(404).json({ message: "Order not found" });
+
+            // Total time from billedAt → now (collection moment)
+            const totalTimeSecs = diffSecs(order.billedAt, now);
+
+            await order.update({
+                status: 'completed',
+                completedAt: now,
+                isVisible: false,
+                totalTimeSecs       // ← overall order duration
+            });
+
+            res.status(200).json({
+                message: "Order completed and removed from live view",
+                totalTimeSecs,
+                totalTimeFormatted: formatDuration(totalTimeSecs)
+            });
         } catch (error) {
             res.status(500).json({ error: error.message });
         }
     },
 
+    // ─── 5. TOGGLE HIDE ────────────────────────────────────────────────────────
     toggleHide: async (req, res) => {
         try {
             const { billNum } = req.params;
             const order = await req.Liveorders.findOne({ where: { billNum } });
 
-            if (!order) {
-                return res.status(404).json({ message: "Order not found" });
-            }
+            if (!order) return res.status(404).json({ message: "Order not found" });
 
-            // Flip the boolean value (true -> false or false -> true)
             const updatedOrder = await order.update({
                 isHidden: !order.isHidden
             });
@@ -144,29 +213,35 @@ const liveOrdersController = {
             res.status(500).json({ error: error.message });
         }
     }
+};
 
-}
+module.exports = liveOrdersController;
 
-module.exports = liveOrdersController
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 /**
- * Helper function to calculate time differences in minutes/seconds
+ * Builds a human-readable metrics object from a live order record.
  */
-function calculateMetrics(order, updateData, now) {
-    const diffInSeconds = (start, end) => start && end ? Math.floor((end - start) / 1000) : 0;
-
-    const metrics = {
-        pickingTime: 0,
-        verificationTime: 0,
-        totalTimeSoFar: diffInSeconds(order.billedAt, now)
+function buildMetrics(order) {
+    const now = new Date();
+    return {
+        pickerName: order.pickerName || null,
+        verifierName: order.verifierName || null,
+        pickingTimeSecs: order.pickingTimeSecs ?? diffSecs(order.pickedAt, now),
+        pickingTimeFormatted: formatDuration(order.pickingTimeSecs ?? diffSecs(order.pickedAt, now)),
+        verificationTimeSecs: order.verificationTimeSecs ?? diffSecs(order.verifiedAt, now),
+        verificationTimeFormatted: formatDuration(order.verificationTimeSecs ?? diffSecs(order.verifiedAt, now)),
+        totalTimeSecs: order.totalTimeSecs ?? diffSecs(order.billedAt, now),
+        totalTimeFormatted: formatDuration(order.totalTimeSecs ?? diffSecs(order.billedAt, now))
     };
+}
 
-    if (order.status === 'picking') {
-        metrics.pickingTime = diffInSeconds(order.pickedAt, now);
-    } else if (order.status === 'verifying') {
-        metrics.pickingTime = diffInSeconds(order.pickedAt, now);
-        metrics.verificationTime = diffInSeconds(order.verifiedAt, now);
-    }
-
-    return metrics;
+/**
+ * Converts seconds → "Xm Ys" string. Returns null if value is null/0.
+ */
+function formatDuration(secs) {
+    if (secs == null || secs <= 0) return null;
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
