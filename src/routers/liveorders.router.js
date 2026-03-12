@@ -3,30 +3,50 @@ const router = express.Router();
 
 const liveOrdersController = require("../controllers/liveOrders.controller");
 
-// 1. Initial Billing (Admin / Cashier)
-//    Body: { customerName, mobile, billNum, itemsCount, empId? }
+// ─── BILLING ─────────────────────────────────────────────────────────────────
+// Create a new bill (Admin / Cashier)
 router.post('/order/create', liveOrdersController.createBill);
 
-// 2. Employee Scanning (Picking & Verifying)
-//    Body: { billNum, empId }
-//    Status transitions automatically:  billed → picking → verifying → collect
-router.post('/order/scan', liveOrdersController.scanBill);
 
-// 3. Admin Manual Hide (Toggle)
-router.patch('/order/toggle-hide/:billNum', liveOrdersController.toggleHide);
+// ─── PICKING MODULE ───────────────────────────────────────────────────────────
+// Start picking — only works if order status is 'billed'
+// On success  → status becomes 'picking', records pickStartTime
+// On wrong status → 400 with clear reason why it was rejected
+router.post('/order/scan/pick', liveOrdersController.startPicking);
 
-// 4. Final Collection — marks 'completed' and saves order_history row
+
+// ─── VERIFYING MODULE ─────────────────────────────────────────────────────────
+// Start verifying — only works if order status is 'picking'
+// On success  → status becomes 'verifying', closes picking_table row (pickStart→pickEnd)
+// On wrong status → 400 with clear reason (e.g. "must pick first")
+router.post('/order/scan/verify', liveOrdersController.startVerifying);
+
+
+// ─── COLLECT MODULE ───────────────────────────────────────────────────────────
+// Mark order ready for collection — only works if status is 'verifying'
+// On success  → status becomes 'collect', closes verify_table row (verifyStart→verifyEnd)
+// On wrong status → 400 with clear reason (e.g. "must verify first")
+router.post('/order/scan/collect', liveOrdersController.readyToCollect);
+
+
+// ─── COMPLETE ORDER ───────────────────────────────────────────────────────────
+// Customer collects the order — only works if status is 'collect'
+// Marks status as 'completed', hides from live feed, writes full row to order_history
 router.patch('/order/complete/:billNum', liveOrdersController.completeOrder);
 
-// 5. Public Live Screen Feed
+
+// ─── ADMIN UTILITIES ──────────────────────────────────────────────────────────
+// Toggle hide/show on live screen
+router.patch('/order/toggle-hide/:billNum', liveOrdersController.toggleHide);
+
+// Live display feed (only visible, non-hidden active orders)
 router.get('/order/live-feed', liveOrdersController.getLiveFeed);
 
-// ── Admin / Reporting routes ──────────────────────────────────────────────────
-
-// 6. Full history of all completed orders (admin dashboard)
+// Full history of all completed orders (admin dashboard)
 router.get('/order/history', liveOrdersController.getOrderHistory);
 
-// 7. Drill-down for a single bill — returns billed, picking, verify & history rows
+// Drill-down for a single bill — billed + picking + verify + history rows
 router.get('/order/history/:billNum', liveOrdersController.getBillHistory);
+
 
 module.exports = router;

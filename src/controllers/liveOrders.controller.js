@@ -107,96 +107,243 @@ const liveOrdersController = {
         }
     },
 
-    // ─── 3. SCAN BILL (employee scans to advance the stage) ───────────────────
+    // ─── 3a. START PICKING ─────────────────────────────────────────────────────
     //
-    //  Flow:
-    //    billed    → [scan] → picking    → writes nothing yet (picking STARTS)
-    //    picking   → [scan] → verifying  → writes row to picking_table (picking ENDS)
-    //    verifying → [scan] → collect    → writes row to verify_table  (verify ENDS)
+    //  Allowed only when status === 'billed'.
+    //  Transitions: billed → picking
+    //  Records: pickerId, pickerName, pickedAt (pick start time) in live_orders
     //
-    scanBill: async (req, res) => {
+    //  POST /api/v1/order/scan/pick
+    //  Body: { billNum, empId }
+    //
+    startPicking: async (req, res) => {
         try {
             const { billNum, empId } = req.body;
+
+            if (!billNum || !empId) {
+                return res.status(400).json({ message: "billNum and empId are required" });
+            }
+
             const now = new Date();
 
+            // ── Fetch order ───────────────────────────────────────────────────
             const order = await req.Liveorders.findOne({ where: { billNum } });
-            if (!order) return res.status(404).json({ message: "Bill not found" });
+            if (!order) {
+                return res.status(404).json({ message: `Bill '${billNum}' not found` });
+            }
 
-            const employee = await req.EmployeeModal.findOne({ where: { empId } });
-            if (!employee) return res.status(404).json({ message: "Employee ID not recognized" });
+            // ── Strict status guard ───────────────────────────────────────────
+            if (order.status !== 'billed') {
+                const hint = {
+                    picking:   "This order is already being picked.",
+                    verifying: "This order has already been picked and is in verification. Complete verification first.",
+                    collect:   "This order has already been verified and is ready for collection.",
+                    completed: "This order is already completed."
+                }[order.status] || `Current status is '${order.status}'.`;
 
-            let updateData     = {};
-            let feedbackMessage = "";
-
-            if (order.status === 'billed') {
-                // ── Picking STARTS ────────────────────────────────────────────────
-                updateData = {
-                    status:     'picking',
-                    pickerId:   empId,
-                    pickerName: employee.empName,
-                    pickedAt:   now          // pickStartTime
-                };
-                feedbackMessage = `Picking started by ${employee.empName}`;
-
-            } else if (order.status === 'picking') {
-                // ── Picking ENDS / Verification STARTS ───────────────────────────
-                const pickingTimeSecs = diffSecs(order.pickedAt, now);
-
-                updateData = {
-                    status:          'verifying',
-                    verifierId:      empId,
-                    verifierName:    employee.empName,
-                    verifiedAt:      now,          // verifyStartTime / pickEndTime
-                    pickingTimeSecs               // store duration in live_orders too
-                };
-                feedbackMessage = `Picking completed (${formatDuration(pickingTimeSecs)}). Verification started by ${employee.empName}`;
-
-                // ── Write to picking_table ────────────────────────────────────────
-                await req.PickingTable.create({
-                    billNum,
-                    empId,
-                    empName:            employee.empName,
-                    pickStartTime:      order.pickedAt,   // when picking started
-                    pickEndTime:        now,               // now = picking ended
-                    pickingDurationSecs: pickingTimeSecs
-                });
-
-            } else if (order.status === 'verifying') {
-                // ── Verification ENDS / Ready to Collect ─────────────────────────
-                const verificationTimeSecs = diffSecs(order.verifiedAt, now);
-
-                updateData = {
-                    status:                'collect',
-                    collectAt:             now,           // verifyEndTime / collect-ready
-                    verificationTimeSecs                 // store duration in live_orders too
-                };
-                feedbackMessage = `Verification complete (${formatDuration(verificationTimeSecs)}). Order ready for collection`;
-
-                // ── Write to verify_table ─────────────────────────────────────────
-                await req.VerifyTable.create({
-                    billNum,
-                    empId,
-                    empName:             employee.empName,
-                    itemsCount:          order.itemsCount,
-                    verifyStartTime:     order.verifiedAt,  // when verification started
-                    verifyEndTime:       now,                // now = verification ended
-                    verifyDurationSecs:  verificationTimeSecs
-                });
-
-            } else {
                 return res.status(400).json({
-                    message: `Order is currently in '${order.status}' status and cannot be scanned`
+                    message: `Cannot start picking — order is not in 'billed' status. ${hint}`,
+                    currentStatus: order.status
                 });
             }
 
-            await order.update(updateData);
+            // ── Fetch employee ────────────────────────────────────────────────
+            const employee = await req.EmployeeModal.findOne({ where: { empId } });
+            if (!employee) {
+                return res.status(404).json({ message: `Employee ID '${empId}' not recognized` });
+            }
+
+            // ── Update live order: billed → picking ───────────────────────────
+            await order.update({
+                status:     'picking',
+                pickerId:   empId,
+                pickerName: employee.empName,
+                pickedAt:   now                // pick START time
+            });
+
             const updated = await req.Liveorders.findOne({ where: { billNum } });
 
             res.status(200).json({
-                message:   feedbackMessage,
-                order:     updated,
-                doingBy:   employee.empName,
-                metrics:   buildMetrics(updated)
+                message:       `Picking started by ${employee.empName}`,
+                currentStatus: 'picking',
+                pickerName:    employee.empName,
+                pickStartTime: now,
+                order:         updated
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    },
+
+    // ─── 3b. START VERIFYING ──────────────────────────────────────────────────
+    //
+    //  Allowed only when status === 'picking'.
+    //  Transitions: picking → verifying
+    //  Records: pickEndTime, pickingDurationSecs → picking_table
+    //           verifierId, verifierName, verifiedAt (verify start) → live_orders
+    //
+    //  POST /api/v1/order/scan/verify
+    //  Body: { billNum, empId }
+    //
+    startVerifying: async (req, res) => {
+        try {
+            const { billNum, empId } = req.body;
+
+            if (!billNum || !empId) {
+                return res.status(400).json({ message: "billNum and empId are required" });
+            }
+
+            const now = new Date();
+
+            // ── Fetch order ───────────────────────────────────────────────────
+            const order = await req.Liveorders.findOne({ where: { billNum } });
+            if (!order) {
+                return res.status(404).json({ message: `Bill '${billNum}' not found` });
+            }
+
+            // ── Strict status guard ───────────────────────────────────────────
+            if (order.status !== 'picking') {
+                const hint = {
+                    billed:    "This order has not been picked yet. Please start picking first using /order/scan/pick.",
+                    verifying: "This order is already in verification.",
+                    collect:   "This order has already been verified and is ready for collection.",
+                    completed: "This order is already completed."
+                }[order.status] || `Current status is '${order.status}'.`;
+
+                return res.status(400).json({
+                    message: `Cannot start verification — order is not in 'picking' status. ${hint}`,
+                    currentStatus: order.status
+                });
+            }
+
+            // ── Fetch employee ────────────────────────────────────────────────
+            const employee = await req.EmployeeModal.findOne({ where: { empId } });
+            if (!employee) {
+                return res.status(404).json({ message: `Employee ID '${empId}' not recognized` });
+            }
+
+            // ── Calculate picking duration ────────────────────────────────────
+            const pickingTimeSecs = diffSecs(order.pickedAt, now);
+
+            // ── Write to picking_table (picking is now DONE) ──────────────────
+            await req.PickingTable.create({
+                billNum,
+                empId:              order.pickerId,          // the one who did the picking
+                empName:            order.pickerName,
+                pickStartTime:      order.pickedAt,          // pick start
+                pickEndTime:        now,                     // pick end = verify start
+                pickingDurationSecs: pickingTimeSecs
+            });
+
+            // ── Update live order: picking → verifying ────────────────────────
+            await order.update({
+                status:          'verifying',
+                verifierId:      empId,
+                verifierName:    employee.empName,
+                verifiedAt:      now,                        // verify START time
+                pickingTimeSecs
+            });
+
+            const updated = await req.Liveorders.findOne({ where: { billNum } });
+
+            res.status(200).json({
+                message:           `Picking completed (${formatDuration(pickingTimeSecs)}). Verification started by ${employee.empName}`,
+                currentStatus:     'verifying',
+                pickerName:        order.pickerName,
+                pickStartTime:     order.pickedAt,
+                pickEndTime:       now,
+                pickingDuration:   formatDuration(pickingTimeSecs),
+                pickingTimeSecs,
+                verifierName:      employee.empName,
+                verifyStartTime:   now,
+                order:             updated,
+                metrics:           buildMetrics(updated)
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    },
+
+    // ─── 3c. READY TO COLLECT ─────────────────────────────────────────────────
+    //
+    //  Allowed only when status === 'verifying'.
+    //  Transitions: verifying → collect
+    //  Records: verifyEndTime, verifyDurationSecs → verify_table
+    //           collectAt → live_orders
+    //
+    //  POST /api/v1/order/scan/collect
+    //  Body: { billNum, empId }
+    //
+    readyToCollect: async (req, res) => {
+        try {
+            const { billNum, empId } = req.body;
+
+            if (!billNum || !empId) {
+                return res.status(400).json({ message: "billNum and empId are required" });
+            }
+
+            const now = new Date();
+
+            // ── Fetch order ───────────────────────────────────────────────────
+            const order = await req.Liveorders.findOne({ where: { billNum } });
+            if (!order) {
+                return res.status(404).json({ message: `Bill '${billNum}' not found` });
+            }
+
+            // ── Strict status guard ───────────────────────────────────────────
+            if (order.status !== 'verifying') {
+                const hint = {
+                    billed:    "This order has not been picked yet. Start picking first using /order/scan/pick.",
+                    picking:   "This order is still being picked. Complete picking first using /order/scan/verify.",
+                    collect:   "This order is already ready for collection.",
+                    completed: "This order is already completed."
+                }[order.status] || `Current status is '${order.status}'.`;
+
+                return res.status(400).json({
+                    message: `Cannot mark as collect — order is not in 'verifying' status. ${hint}`,
+                    currentStatus: order.status
+                });
+            }
+
+            // ── Fetch employee ────────────────────────────────────────────────
+            const employee = await req.EmployeeModal.findOne({ where: { empId } });
+            if (!employee) {
+                return res.status(404).json({ message: `Employee ID '${empId}' not recognized` });
+            }
+
+            // ── Calculate verification duration ───────────────────────────────
+            const verificationTimeSecs = diffSecs(order.verifiedAt, now);
+
+            // ── Write to verify_table (verification is now DONE) ─────────────
+            await req.VerifyTable.create({
+                billNum,
+                empId:              order.verifierId,        // the one who verified
+                empName:            order.verifierName,
+                itemsCount:         order.itemsCount,
+                verifyStartTime:    order.verifiedAt,        // verify start
+                verifyEndTime:      now,                     // verify end
+                verifyDurationSecs: verificationTimeSecs
+            });
+
+            // ── Update live order: verifying → collect ────────────────────────
+            await order.update({
+                status:               'collect',
+                collectAt:            now,
+                verificationTimeSecs
+            });
+
+            const updated = await req.Liveorders.findOne({ where: { billNum } });
+
+            res.status(200).json({
+                message:             `Verification complete (${formatDuration(verificationTimeSecs)}). Order is ready for collection`,
+                currentStatus:       'collect',
+                verifierName:        order.verifierName,
+                verifyStartTime:     order.verifiedAt,
+                verifyEndTime:       now,
+                verifyDuration:      formatDuration(verificationTimeSecs),
+                verificationTimeSecs,
+                order:               updated,
+                metrics:             buildMetrics(updated)
             });
         } catch (error) {
             res.status(500).json({ error: error.message });
