@@ -4,7 +4,7 @@ const cors = require('cors');
 
 dotenv.config();
 
-const { initDb, userModel,EmployeeModal,Liveorders } = require('./src/modals');
+const { initDb, userModel, EmployeeModal, Liveorders, BilledTable, PickingTable, VerifyTable, OrderHistory } = require('./src/modals');
 const authRouter = require('./src/routers/auth.Router');
 const employeeRouter = require('./src/routers/employee.router')
 const liveOrderRouter = require("./src/routers/liveorders.router")
@@ -16,12 +16,13 @@ app.use(express.json());
 app.use(cors());
 
 app.use((req, res, next) => {
-  req.userModel = userModel;
+  req.userModel     = userModel;
   req.EmployeeModal = EmployeeModal;
-  req.Liveorders = Liveorders;
-
-
-  
+  req.Liveorders    = Liveorders;
+  req.BilledTable   = BilledTable;
+  req.PickingTable  = PickingTable;
+  req.VerifyTable   = VerifyTable;
+  req.OrderHistory  = OrderHistory;
   next();
 });
 

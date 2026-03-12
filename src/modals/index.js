@@ -1,15 +1,20 @@
 const sequelize = require('../config/db');
 
-const createUserModels = require('./users')
-const createEmployee = require("./employers")
-const createLiveOrder = require("./liveOrders")
+const createUserModels    = require('./users');
+const createEmployee      = require('./employers');
+const createLiveOrder     = require('./liveOrders');
+const createBilledTable   = require('./billedTable');
+const createPickingTable  = require('./pickingTable');
+const createVerifyTable   = require('./verifyTable');
+const createOrderHistory  = require('./orderHistory');
 
-
-const userModel = createUserModels(sequelize);
-const EmployeeModal = createEmployee(sequelize);
-const Liveorders = createLiveOrder(sequelize);
-
-
+const userModel      = createUserModels(sequelize);
+const EmployeeModal  = createEmployee(sequelize);
+const Liveorders     = createLiveOrder(sequelize);
+const BilledTable    = createBilledTable(sequelize);
+const PickingTable   = createPickingTable(sequelize);
+const VerifyTable    = createVerifyTable(sequelize);
+const OrderHistory   = createOrderHistory(sequelize);
 
 const initDb = async () => {
   try {
@@ -33,4 +38,8 @@ module.exports = {
     userModel,
     EmployeeModal,
     Liveorders,
-}
+    BilledTable,
+    PickingTable,
+    VerifyTable,
+    OrderHistory,
+};

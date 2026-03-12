@@ -5,17 +5,42 @@ const diffSecs = (start, end) =>
 const liveOrdersController = {
 
     // ─── 1. CREATE BILL ────────────────────────────────────────────────────────
+    //
+    // Also writes a row to billed_table for tracking.
+    // Optional: pass `empId` in the body to capture which employee billed it.
     createBill: async (req, res) => {
         try {
-            const { customerName, mobile, billNum, itemsCount } = req.body;
+            const { customerName, mobile, billNum, itemsCount, empId } = req.body;
+            const now = new Date();
+
+            // Resolve billing employee name (optional)
+            let empName = null;
+            if (empId) {
+                const employee = await req.EmployeeModal.findOne({ where: { empId } });
+                if (employee) empName = employee.empName;
+            }
+
+            // 1. Create the live order
             const newOrder = await req.Liveorders.create({
                 customerName,
                 mobile,
                 billNum,
                 itemsCount,
                 status: 'billed',
-                billedAt: new Date()
+                billedAt: now
             });
+
+            // 2. Write to billed_table
+            await req.BilledTable.create({
+                billNum,
+                customerName,
+                mobile,
+                itemsCount,
+                empId:   empId   || null,
+                empName: empName || null,
+                billedAt: now
+            });
+
             res.status(201).json({ message: "Bill created and displayed", newOrder });
         } catch (error) {
             res.status(500).json({ error: error.message });
@@ -33,43 +58,35 @@ const liveOrdersController = {
                 order: [['updatedAt', 'DESC']],
                 attributes: [
                     'customerName',
-                    'mobile',           // ← customer mobile from create bill
+                    'mobile',
                     'billNum',
                     'status',
                     'itemsCount',
-                    // Who is doing each task
                     'pickerId',
                     'pickerName',
                     'verifierId',
                     'verifierName',
-                    // Stage timestamps
                     'billedAt',
                     'pickedAt',
                     'verifiedAt',
                     'collectAt',
                     'completedAt',
-                    // Pre-calculated durations (seconds)
                     'pickingTimeSecs',
                     'verificationTimeSecs',
                     'totalTimeSecs'
                 ]
             });
 
-            // For in-progress orders, append a live "elapsed" duration so the
-            // frontend can display real-time counters without re-fetching.
             const now = new Date();
             const orders = activeOrders.map(o => {
                 const plain = o.get({ plain: true });
 
-                // Live picking duration (for orders currently being picked)
                 if (plain.status === 'picking' && plain.pickedAt) {
                     plain.livePickingElapsedSecs = diffSecs(plain.pickedAt, now);
                 }
-                // Live verification duration (for orders currently being verified)
                 if (plain.status === 'verifying' && plain.verifiedAt) {
                     plain.liveVerificationElapsedSecs = diffSecs(plain.verifiedAt, now);
                 }
-                // Live total elapsed since billed (any active order)
                 if (plain.billedAt) {
                     plain.liveTotalElapsedSecs = diffSecs(plain.billedAt, now);
                 }
@@ -93,10 +110,9 @@ const liveOrdersController = {
     // ─── 3. SCAN BILL (employee scans to advance the stage) ───────────────────
     //
     //  Flow:
-    //    billed   → [scan] → picking     (picking STARTS,      picker assigned)
-    //    picking  → [scan] → verifying   (picking ENDS,        pickingTimeSecs stored)
-    //                                    (verification STARTS, verifier assigned)
-    //    verifying→ [scan] → collect     (verification ENDS,   verificationTimeSecs stored)
+    //    billed    → [scan] → picking    → writes nothing yet (picking STARTS)
+    //    picking   → [scan] → verifying  → writes row to picking_table (picking ENDS)
+    //    verifying → [scan] → collect    → writes row to verify_table  (verify ENDS)
     //
     scanBill: async (req, res) => {
         try {
@@ -109,40 +125,63 @@ const liveOrdersController = {
             const employee = await req.EmployeeModal.findOne({ where: { empId } });
             if (!employee) return res.status(404).json({ message: "Employee ID not recognized" });
 
-            let updateData = {};
+            let updateData     = {};
             let feedbackMessage = "";
 
             if (order.status === 'billed') {
-                // ── Picking STARTS ──────────────────────────────────────────────
+                // ── Picking STARTS ────────────────────────────────────────────────
                 updateData = {
-                    status: 'picking',
-                    pickerId: empId,
+                    status:     'picking',
+                    pickerId:   empId,
                     pickerName: employee.empName,
-                    pickedAt: now          // picking start timestamp
+                    pickedAt:   now          // pickStartTime
                 };
                 feedbackMessage = `Picking started by ${employee.empName}`;
 
             } else if (order.status === 'picking') {
-                // ── Picking ENDS / Verification STARTS ─────────────────────────
-                const pickingTimeSecs = diffSecs(order.pickedAt, now); // picking duration
+                // ── Picking ENDS / Verification STARTS ───────────────────────────
+                const pickingTimeSecs = diffSecs(order.pickedAt, now);
+
                 updateData = {
-                    status: 'verifying',
-                    verifierId: empId,
-                    verifierName: employee.empName,
-                    verifiedAt: now,        // verification start / picking end timestamp
-                    pickingTimeSecs         // store how long picking took
+                    status:          'verifying',
+                    verifierId:      empId,
+                    verifierName:    employee.empName,
+                    verifiedAt:      now,          // verifyStartTime / pickEndTime
+                    pickingTimeSecs               // store duration in live_orders too
                 };
                 feedbackMessage = `Picking completed (${formatDuration(pickingTimeSecs)}). Verification started by ${employee.empName}`;
 
+                // ── Write to picking_table ────────────────────────────────────────
+                await req.PickingTable.create({
+                    billNum,
+                    empId,
+                    empName:            employee.empName,
+                    pickStartTime:      order.pickedAt,   // when picking started
+                    pickEndTime:        now,               // now = picking ended
+                    pickingDurationSecs: pickingTimeSecs
+                });
+
             } else if (order.status === 'verifying') {
-                // ── Verification ENDS / Ready to Collect ───────────────────────
-                const verificationTimeSecs = diffSecs(order.verifiedAt, now); // verification duration
+                // ── Verification ENDS / Ready to Collect ─────────────────────────
+                const verificationTimeSecs = diffSecs(order.verifiedAt, now);
+
                 updateData = {
-                    status: 'collect',
-                    collectAt: now,          // collect-ready timestamp / verification end
-                    verificationTimeSecs     // store how long verification took
+                    status:                'collect',
+                    collectAt:             now,           // verifyEndTime / collect-ready
+                    verificationTimeSecs                 // store duration in live_orders too
                 };
                 feedbackMessage = `Verification complete (${formatDuration(verificationTimeSecs)}). Order ready for collection`;
+
+                // ── Write to verify_table ─────────────────────────────────────────
+                await req.VerifyTable.create({
+                    billNum,
+                    empId,
+                    empName:             employee.empName,
+                    itemsCount:          order.itemsCount,
+                    verifyStartTime:     order.verifiedAt,  // when verification started
+                    verifyEndTime:       now,                // now = verification ended
+                    verifyDurationSecs:  verificationTimeSecs
+                });
 
             } else {
                 return res.status(400).json({
@@ -154,10 +193,10 @@ const liveOrdersController = {
             const updated = await req.Liveorders.findOne({ where: { billNum } });
 
             res.status(200).json({
-                message: feedbackMessage,
-                order: updated,
-                doingBy: employee.empName,
-                metrics: buildMetrics(updated)
+                message:   feedbackMessage,
+                order:     updated,
+                doingBy:   employee.empName,
+                metrics:   buildMetrics(updated)
             });
         } catch (error) {
             res.status(500).json({ error: error.message });
@@ -165,6 +204,10 @@ const liveOrdersController = {
     },
 
     // ─── 4. COMPLETE ORDER (customer collects) ─────────────────────────────────
+    //
+    // Marks the order as completed and writes the FULL lifecycle summary
+    // to order_history for admin reporting.
+    //
     completeOrder: async (req, res) => {
         try {
             const { billNum } = req.params;
@@ -173,18 +216,55 @@ const liveOrdersController = {
             const order = await req.Liveorders.findOne({ where: { billNum } });
             if (!order) return res.status(404).json({ message: "Order not found" });
 
-            // Total time from billedAt → now (collection moment)
+            if (order.status !== 'collect') {
+                return res.status(400).json({
+                    message: `Order must be in 'collect' status to complete. Current status: '${order.status}'`
+                });
+            }
+
             const totalTimeSecs = diffSecs(order.billedAt, now);
 
+            // 1. Update live order
             await order.update({
-                status: 'completed',
-                completedAt: now,
-                isVisible: false,
-                totalTimeSecs       // ← overall order duration
+                status:       'completed',
+                completedAt:  now,
+                isVisible:    false,
+                totalTimeSecs
+            });
+
+            // 2. Write consolidated history row
+            await req.OrderHistory.create({
+                billNum,
+                customerName:        order.customerName,
+                mobile:              order.mobile,
+                itemsCount:          order.itemsCount,
+
+                // billed
+                billedAt:            order.billedAt,
+
+                // picking
+                pickerId:            order.pickerId,
+                pickerName:          order.pickerName,
+                pickStartTime:       order.pickedAt,
+                pickEndTime:         order.verifiedAt,     // picking ended when verifying started
+                pickingDurationSecs: order.pickingTimeSecs,
+
+                // verifying
+                verifierId:          order.verifierId,
+                verifierName:        order.verifierName,
+                verifyStartTime:     order.verifiedAt,
+                verifyEndTime:       order.collectAt,      // verify ended when collect started
+                verifyDurationSecs:  order.verificationTimeSecs,
+
+                // collect & complete
+                collectOrderTime:    order.collectAt,
+                completedAt:         now,
+                totalTimeSecs,
+                status:              'completed'
             });
 
             res.status(200).json({
-                message: "Order completed and removed from live view",
+                message:            "Order completed — history saved",
                 totalTimeSecs,
                 totalTimeFormatted: formatDuration(totalTimeSecs)
             });
@@ -207,10 +287,65 @@ const liveOrdersController = {
 
             res.status(200).json({
                 message: `Order visibility toggled. isHidden is now: ${updatedOrder.isHidden}`,
-                order: updatedOrder
+                order:   updatedOrder
             });
         } catch (error) {
             res.status(500).json({ error: error.message });
+        }
+    },
+
+    // ─── 6. GET ORDER HISTORY (admin full lifecycle view) ──────────────────────
+    getOrderHistory: async (req, res) => {
+        try {
+            const history = await req.OrderHistory.findAll({
+                order: [['completedAt', 'DESC']]
+            });
+
+            // Attach formatted durations for easy display
+            const rows = history.map(h => {
+                const plain = h.get({ plain: true });
+                plain.pickingTimeFormatted      = formatDuration(plain.pickingDurationSecs);
+                plain.verifyTimeFormatted       = formatDuration(plain.verifyDurationSecs);
+                plain.totalTimeFormatted        = formatDuration(plain.totalTimeSecs);
+                return plain;
+            });
+
+            res.status(200).json({
+                success: true,
+                count:   rows.length,
+                history: rows
+            });
+        } catch (error) {
+            res.status(500).json({ success: false, error: error.message });
+        }
+    },
+
+    // ─── 7. GET SINGLE BILL HISTORY (admin drill-down) ────────────────────────
+    getBillHistory: async (req, res) => {
+        try {
+            const { billNum } = req.params;
+
+            const [billed, picking, verify, history] = await Promise.all([
+                req.BilledTable.findOne({ where: { billNum } }),
+                req.PickingTable.findOne({ where: { billNum } }),
+                req.VerifyTable.findOne({ where: { billNum } }),
+                req.OrderHistory.findOne({ where: { billNum } })
+            ]);
+
+            if (!billed && !history) {
+                return res.status(404).json({ message: "No records found for this bill number" });
+            }
+
+            res.status(200).json({
+                success: true,
+                billNum,
+                billedRecord:  billed  || null,
+                pickingRecord: picking || null,
+                verifyRecord:  verify  || null,
+                historyRecord: history || null
+            });
+        } catch (error) {
+            res.status(500).json({ success: false, error: error.message });
         }
     }
 };
@@ -219,26 +354,20 @@ module.exports = liveOrdersController;
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
 
-/**
- * Builds a human-readable metrics object from a live order record.
- */
 function buildMetrics(order) {
     const now = new Date();
     return {
-        pickerName: order.pickerName || null,
-        verifierName: order.verifierName || null,
-        pickingTimeSecs: order.pickingTimeSecs ?? diffSecs(order.pickedAt, now),
-        pickingTimeFormatted: formatDuration(order.pickingTimeSecs ?? diffSecs(order.pickedAt, now)),
-        verificationTimeSecs: order.verificationTimeSecs ?? diffSecs(order.verifiedAt, now),
-        verificationTimeFormatted: formatDuration(order.verificationTimeSecs ?? diffSecs(order.verifiedAt, now)),
-        totalTimeSecs: order.totalTimeSecs ?? diffSecs(order.billedAt, now),
-        totalTimeFormatted: formatDuration(order.totalTimeSecs ?? diffSecs(order.billedAt, now))
+        pickerName:                  order.pickerName || null,
+        verifierName:                order.verifierName || null,
+        pickingTimeSecs:             order.pickingTimeSecs ?? diffSecs(order.pickedAt, now),
+        pickingTimeFormatted:        formatDuration(order.pickingTimeSecs ?? diffSecs(order.pickedAt, now)),
+        verificationTimeSecs:        order.verificationTimeSecs ?? diffSecs(order.verifiedAt, now),
+        verificationTimeFormatted:   formatDuration(order.verificationTimeSecs ?? diffSecs(order.verifiedAt, now)),
+        totalTimeSecs:               order.totalTimeSecs ?? diffSecs(order.billedAt, now),
+        totalTimeFormatted:          formatDuration(order.totalTimeSecs ?? diffSecs(order.billedAt, now))
     };
 }
 
-/**
- * Converts seconds → "Xm Ys" string. Returns null if value is null/0.
- */
 function formatDuration(secs) {
     if (secs == null || secs <= 0) return null;
     const m = Math.floor(secs / 60);
