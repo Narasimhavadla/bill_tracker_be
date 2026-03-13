@@ -26,6 +26,7 @@ const liveOrdersController = {
                 mobile,
                 billNum,
                 itemsCount,
+                empId,
                 status: 'billed',
                 billedAt: now
             });
@@ -53,27 +54,28 @@ const liveOrdersController = {
             const activeOrders = await req.Liveorders.findAll({
                 where: {
                     isVisible: true,
-                    isHidden: false
+                    // isHidden: false
                 },
                 order: [['updatedAt', 'DESC']],
-                attributes: [
-                    'customerName',
-                    'mobile',
-                    'billNum',
-                    'status',
-                    'itemsCount',
-                    'pickerId',
-                    'pickerName',
-                    'verifierId',
-                    'verifierName',
-                    'billedAt',
-                    'pickedAt',
-                    'verifiedAt',
-                    'collectAt',
-                    'completedAt',
-                    'pickingTimeSecs',
-                    'verificationTimeSecs',
-                    'totalTimeSecs'
+               attributes: [
+                'customerName',
+                'mobile',
+                'billNum',
+                'status',
+                'itemsCount',
+                'pickerId',
+                'pickerName',
+                'verifierId',
+                'verifierName',
+                'billedAt',
+                'pickedAt',
+                'verifiedAt',
+                'collectAt',
+                'completedAt',
+                'pickingTimeSecs',
+                'verificationTimeSecs',
+                'totalTimeSecs',
+                'isHidden'
                 ]
             });
 

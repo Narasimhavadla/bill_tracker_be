@@ -80,50 +80,85 @@ const EmployeeController = {
     }
   },
 
-  updateEmployee: async (req, res) => {
+//   updateEmployee: async (req, res) => {
 
+//   try {
+
+//     const { id } = req.params;
+
+//     const { empName, phone, empId, canPick, canVerify } = req.body;
+//     // const { empName, phone, empId, canBill, canPick, canVerify } = req.body;
+
+//     const employee = await req.EmployeeModal.findByPk(id);
+
+//     if (!employee) {
+//       return res.status(404).json({
+//         status: false,
+//         message: "Employee not found"
+//       });
+//     }
+
+//     await employee.update({
+//       empName,
+//       phone,
+//       empId,
+//       // canBill,
+//       canPick,
+//       canVerify
+//     });
+
+//     res.json({
+//       status: true,
+//       message: "Employee updated successfully",
+//       data: employee
+//     });
+
+//   } catch (error) {
+
+//     console.error(error);
+
+//     res.status(500).json({
+//       status: false,
+//       message: "Employee update failed"
+//     });
+
+//   }
+
+// },
+
+// employee.controller.js
+
+updateEmployee: async (req, res) => {
   try {
-
     const { id } = req.params;
-
-    const { empName, phone, empId, canPick, canVerify } = req.body;
-    // const { empName, phone, empId, canBill, canPick, canVerify } = req.body;
+    const { empName, phone, empId, canPick, canVerify, password } = req.body;
 
     const employee = await req.EmployeeModal.findByPk(id);
+    if (!employee) return res.status(404).json({ status: false, message: "Not found" });
 
-    if (!employee) {
-      return res.status(404).json({
-        status: false,
-        message: "Employee not found"
-      });
+    const oldUsername = employee.empName.toLowerCase();
+
+    // 1. Update Employee Record
+    await employee.update({ empName, phone, empId, canPick, canVerify });
+
+    // 2. Update User Account
+    const user = await req.userModel.findOne({ where: { username: oldUsername } });
+    if (user) {
+      const updateData = { username: empName.toLowerCase() };
+      
+      // Update password ONLY if the admin typed something in the field
+      if (password && password.trim() !== "") {
+        const bcrypt = require("bcrypt");
+        updateData.password = await bcrypt.hash(password, 10);
+      }
+      
+      await user.update(updateData);
     }
 
-    await employee.update({
-      empName,
-      phone,
-      empId,
-      // canBill,
-      canPick,
-      canVerify
-    });
-
-    res.json({
-      status: true,
-      message: "Employee updated successfully",
-      data: employee
-    });
-
+    res.json({ status: true, data: employee });
   } catch (error) {
-
-    console.error(error);
-
-    res.status(500).json({
-      status: false,
-      message: "Employee update failed"
-    });
-
+    res.status(500).json({ status: false, message: "Update failed" });
   }
-
 },
 
 updatePermissions: async (req, res) => {
