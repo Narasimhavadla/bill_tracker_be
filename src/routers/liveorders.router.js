@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 
 const liveOrdersController = require("../controllers/liveOrders.controller");
+const adminAnalyticsController = require("../controllers/AdminAnalytics.controller")
+const PerformanceController = require("../controllers/performance.controller");
+
 
 // ─── BILLING ─────────────────────────────────────────────────────────────────
 // Create a new bill (Admin / Cashier)
@@ -48,5 +51,14 @@ router.get('/order/history', liveOrdersController.getOrderHistory);
 // Drill-down for a single bill — billed + picking + verify + history rows
 router.get('/order/history/:billNum', liveOrdersController.getBillHistory);
 
+router.get('/analytics/stats',adminAnalyticsController.getStats)
+router.get('/analytics/picking-efficiency',adminAnalyticsController.getPickingEfficiency)
+router.get('/analytics/workload',adminAnalyticsController.getWorkloadDistribution)
+
+
+
+router.get("/performance/report", PerformanceController.getEmployeePerformance);
+router.get("/performance/worklog/:empId", PerformanceController.getEmployeeWorkLog);
 
 module.exports = router;
+
